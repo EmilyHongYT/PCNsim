@@ -7,5 +7,10 @@ simulator/wpcn_dbg
 simulator/wpcn-omnet*
 simulator/core
 simulator/General*
+simulator/workload.txt
+simulator/.settings/language.settings.xml
+topologies/topology
+workloads/random-workload.txt
 bkp-config/
 .metadata/
+venv/*

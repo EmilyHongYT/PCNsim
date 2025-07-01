@@ -119,38 +119,42 @@ def get_end_hosts_list(graph, complete):
 
 def create_workload(n_payments, min_payment, max_payment, end_hosts, credit_card, e_commerce):
     payment_list = []
+    num_hosts = len(end_hosts)
+
     if credit_card:
         dataset = check_dataset('credit-card')
         values = get_random_elements_from_dataset(dataset, 'Amount', n_payments)
         values = values.tolist()
-        print (values)
-        for i in range(0,n_payments):
-            pair = random.sample(end_hosts, 2)
-            timestamp = random.randint(1,5000)
-            payment_tuple = (pair[0],pair[1], values.pop(), timestamp)
+        print(values)
+        for i in range(n_payments):
+            sender = random.choice(end_hosts)
+            receiver = random.choice([n for n in end_hosts if n != sender])
+            timestamp = random.randint(1, 5000)
+            payment_tuple = (sender, receiver, values.pop(), timestamp)
             payment_list.append(payment_tuple)
     elif e_commerce:
         dataset = check_dataset('e-commerce')
         values = get_random_elements_from_dataset(dataset, 'UnitPrice', n_payments)
         values = values.tolist()
-        for i in range(0,n_payments):
-            pair = random.sample(end_hosts, 2)
-            timestamp = random.randint(1,5000)
-            payment_tuple = (pair[0],pair[1], values.pop(), timestamp)
+        for i in range(n_payments):
+            sender = random.choice(end_hosts)
+            receiver = random.choice([n for n in end_hosts if n != sender])
+            timestamp = random.randint(1, 5000)
+            payment_tuple = (sender, receiver, values.pop(), timestamp)
             payment_list.append(payment_tuple)
-
     else:
-        for i in range(0,n_payments):
-            pair = random.sample(end_hosts, 2)
+        for i in range(n_payments):
+            sender = random.choice(end_hosts)
+            receiver = random.choice([n for n in end_hosts if n != sender])
             payment_value = random.uniform(min_payment, max_payment)
-            timestamp = random.randint(1,5000)
-            payment_tuple = (pair[0], pair[1], payment_value, timestamp)
+            timestamp = random.randint(1, 5000)
+            payment_tuple = (sender, receiver, payment_value, timestamp)
             payment_list.append(payment_tuple)
 
     sorted_payments = sorted(payment_list, key=lambda x: x[3])
 
-    with open('../workloads/random-workload.txt','w') as out:
-        csv_out=csv.writer(out, delimiter=' ')
+    with open('../workloads/random-workload.txt', 'w') as out:
+        csv_out = csv.writer(out, delimiter=' ')
         for row in sorted_payments:
             csv_out.writerow(row)
 
