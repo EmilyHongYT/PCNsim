@@ -1057,7 +1057,12 @@ void FullNode::sendFirstFulfillHTLC (HTLC *htlc, std::string firstHop) {
     _myStoredMessages.erase(paymentHash);
 
     //Sending HTLC out
-    EV << "Sending pre image " + preImage + " to " + path[(newMessage->getHopCount()-1)] + "for payment hash " + paymentHash + "\n";
+    int idx = newMessage->getHopCount()-1;
+    if (idx >= 0 && idx < path.size()) {
+    EV << "Sending pre image " + preImage + " to " + path[idx] + " for payment hash " + paymentHash + "\n";
+    } else {
+    EV << "Index out of bounds in sendFirstFulfillHTLC: idx=" << idx << ", path.size()=" << path.size() << "\n";
+}
     send(newMessage, gate);
 }
 
