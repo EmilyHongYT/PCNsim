@@ -31,6 +31,8 @@ public:
     virtual void setPreImage(std::string preImage) { _preImage = preImage; };
     virtual std::string getErrorReason() { return _errorReason; };
     virtual void setErrorReason(std::string errorReason) { _errorReason = errorReason; };
+    virtual simtime_t getTimeout() { return _timeout; };
+    virtual void setTimeout(simtime_t timeout) { _timeout = timeout; };
     virtual double getValue() { return _value; };
     virtual void setValue(double value) { _value = value; };
 

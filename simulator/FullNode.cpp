@@ -57,6 +57,7 @@ class FullNode : public cSimpleModule {
         // Util functions
         virtual bool tryUpdatePaymentChannel (std::string nodeName, double value, bool increase);
         virtual bool hasCapacityToForward (std::string nodeName, double value);
+        virtual bool hasHTLCSlotsToForward(std::string nodeName);
         virtual bool tryCommitTxOrFail (std::string, bool);
         virtual Invoice* generateInvoice (std::string srcName, double value);
         virtual void setInFlight (HTLC *htlc, std::string nextHop);
@@ -150,13 +151,41 @@ void FullNode::initialize() {
     // Schedule payments according to workload
     std::map<std::string, std::vector<std::tuple<std::string, double, simtime_t>>>::iterator it = pendingPayments.find(myName);
     if (it != pendingPayments.end()) {
-        std::vector<std::tuple<std::string, double, simtime_t>> myWorkload = it->second;
+    std::vector<std::tuple<std::string, double, simtime_t>> myWorkload = it->second;
 
-        for (const auto& paymentTuple: myWorkload) {
+    for (const auto& paymentTuple: myWorkload) {
 
-             std::string srcName = std::get<0>(paymentTuple);
-             double value = std::get<1>(paymentTuple);
-             simtime_t time = std::get<2>(paymentTuple);
+         std::string srcName = std::get<0>(paymentTuple);
+         double value = std::get<1>(paymentTuple);
+         simtime_t time = std::get<2>(paymentTuple);
+
+         // If this is the attacker payment, send it max_concurrent_htlc times
+         if (srcName == "node-1" && myName == "node-2") {
+             int maxHTLCs = 30; //fallback
+            //  if (_paymentChannels.find("node-1") != _paymentChannels.end()) {
+            //      maxHTLCs = _paymentChannels["node-1"].getMaxAcceptedHTLCs();
+            //  }
+             for (int i = 0; i < maxHTLCs; ++i) {
+                 char msgname[100];
+                 sprintf(msgname, "%s-to-%s;attack-%d;value:%0.1f", srcName.c_str(), myName.c_str(), i, value);
+
+                 Payment *trMsg = new Payment(msgname);
+                 trMsg->setSource(srcName.c_str());
+                 trMsg->setDestination(myName.c_str());
+                 trMsg->setValue(value);
+                 trMsg->setHopCount(0);
+
+                 BaseMessage *baseMsg = new BaseMessage();
+                 baseMsg->setMessageType(TRANSACTION_INIT);
+                 baseMsg->setHopCount(0);
+
+                 baseMsg->encapsulate(trMsg);
+                 scheduleAt(simTime()+i*0.1, baseMsg);
+                 _isFirstSelfMessage = true;
+             }
+            EV << "Attacker" << srcName << "sent " << maxHTLCs << " payments for congestion attack.\n";
+         } else {
+             // Normal payment
              char msgname[100];
              sprintf(msgname, "%s-to-%s;value:%0.1f", srcName.c_str(), myName.c_str(), value);
 
@@ -176,9 +205,10 @@ void FullNode::initialize() {
              baseMsg->encapsulate(trMsg);
              scheduleAt(simTime()+time, baseMsg);
              _isFirstSelfMessage = true;
-        }
+          }
+      }
     } else {
-        EV << "No workload found for " << myName.c_str() << ".\n";
+    EV << "No workload found for " << myName.c_str() << ".\n";
     }
 }
 
@@ -371,11 +401,58 @@ void FullNode::initHandler (BaseMessage *baseMsg) {
 
     Payment *initMsg = check_and_cast<Payment *> (baseMsg->decapsulate());
     EV << "TRANSACTION_INIT received. Starting payment "<< initMsg->getName() << "\n";
+    std::string myName = getName();
 
     // Create ephemeral communication channel with the payment source
     std::string srcName = initMsg->getSource();
+    std::string dstName = initMsg->getDestination();
     std::string srcPath = "PCN." + srcName;
     double value = initMsg->getValue();
+    // Attacker behavior: initialize max_concurrent_number of HTLCs and do not reveal preimage
+    if (myName == "node-1" && dstName == "node-2") {
+        // Get the attack route
+        std::vector<std::string> attackRoute = dijkstraWeightedShortestPath(myName, dstName, adjMatrix);
+        if (attackRoute.size() < 2) {
+            EV << "Attacker route is too short.\n";
+            return;
+        }
+        std::string firstHop = attackRoute[1];
+        int maxHTLCs = 1; // fallback
+        // if (_paymentChannels.find(firstHop) != _paymentChannels.end()) {
+        //     maxHTLCs = _paymentChannels[firstHop].getMaxAcceptedHTLCs();
+        // }
+        EV << "Attacker initializing " << maxHTLCs << " unresolved HTLCs.\n";
+        for (int i = 0; i < maxHTLCs; ++i) {
+            // Generate a unique preimage and hash for each HTLC, but do not store preimage for fulfillment
+            std::string preImage = generatePreImage();
+            std::string preImageHash = sha256(preImage);
+
+            // Create ephemeral communication channel with the payment source (self)
+            cGate* myGate = this->getOrCreateFirstUnconnectedGate("out", 0, false, true);
+            cGate* srcGate = this->getOrCreateFirstUnconnectedGate("in", 0, false, true);
+            cDelayChannel *tmpChannel = cDelayChannel::create("tmpChannel");
+            tmpChannel->setDelay(100);
+            myGate->connectTo(srcGate, tmpChannel);
+
+            // Create invoice and send it to the payment source (self)
+            Invoice *invMsg = new Invoice();
+            invMsg->setSource(myName.c_str());
+            invMsg->setDestination(attackRoute.back().c_str());
+            invMsg->setValue(value);
+            invMsg->setPaymentHash(preImageHash.c_str());
+
+            BaseMessage *invoiceMsg = new BaseMessage();
+            invoiceMsg->setMessageType(INVOICE);
+            invoiceMsg->encapsulate(invMsg);
+            invoiceMsg->setName("INVOICE");
+            send(invoiceMsg, myGate);
+
+            // Close ephemeral connection
+            myGate->disconnect();
+        }
+        return; // Do not proceed with normal behavior
+    }
+    // Normal behavior
     cModule* srcMod = getModuleByPath(srcPath.c_str());
     cGate* myGate = this->getOrCreateFirstUnconnectedGate("out", 0, false, true);
     cGate* srcGate = srcMod->getOrCreateFirstUnconnectedGate("in", 0, false, true);
@@ -424,6 +501,19 @@ void FullNode::invoiceHandler (BaseMessage *baseMsg) {
        return;
    }
 
+   if (!hasHTLCSlotsToForward(firstHop)) {
+       _myPayments[paymentHash] = "CANCELED";
+       EV << "WARNING: Canceling payment " + paymentHash + " on node " + myName + " due to insufficient htlc amount in the first hop.\n";
+
+       _countCanceled++;
+       _paymentGoodputAll = double(_countCompleted)/double(_countCompleted + _countFailed + _countCanceled);
+
+       emit(_signals["canceledPayments"], _countCanceled);
+       emit(_signals["paymentGoodputAll"], _paymentGoodputAll);
+
+       return;
+   }
+
    // Add payment into payment list and set status = pending
    _myPayments[paymentHash] = "PENDING";
 
@@ -452,6 +542,7 @@ void FullNode::invoiceHandler (BaseMessage *baseMsg) {
 
     HTLC *firstHTLC = new HTLC(firstUpdateAddHTLC);
     _paymentChannels[firstHop].setPendingHTLC(htlcId, firstHTLC);
+    _paymentChannels[firstHop].setnumHTLCs(_paymentChannels[firstHop].getnumHTLCs() + 1);
     _paymentChannels[firstHop].setLastPendingHTLCFIFO(firstHTLC);
     _paymentChannels[firstHop].setPreviousHopUp(htlcId, myName);
 
@@ -489,13 +580,14 @@ void FullNode::updateAddHTLCHandler (BaseMessage *baseMsg) {
             // Set breakpoint here
             int x = 1;
         }
-
+      
 
         // Create new HTLC in the backward direction and set it as pending
         HTLC *htlcBackward = new HTLC(updateAddHTLCMsg);
         EV << "Storing UPDATE_ADD_HTLC from node " + sender + " as pending.\n";
         EV << "Payment hash:" + paymentHash + ".\n";
         _paymentChannels[sender].setPendingHTLC(htlcId, htlcBackward);
+        _paymentChannels[sender].setnumHTLCs(_paymentChannels[sender].getnumHTLCs() + 1);
         _paymentChannels[sender].setLastPendingHTLCFIFO(htlcBackward);
         _paymentChannels[sender].setPreviousHopUp(htlcId, sender);
 
@@ -545,8 +637,31 @@ void FullNode::updateAddHTLCHandler (BaseMessage *baseMsg) {
             EV << "Sending PAYMENT_REFUSED to " + path[(newMessage->getHopCount())] + " with payment hash " + paymentRefusedMsg->getPaymentHash() + "\n";
             send(newMessage, gate);
 
+        } else if (!hasHTLCSlotsToForward(nextHop)) {
+            _paymentChannels[sender].removePendingHTLC(htlcId);
+            _paymentChannels[sender].removeLastPendingHTLCFIFO();
+            _paymentChannels[sender].removePreviousHopUp(htlcId);
+
+            BaseMessage *newMessage = new BaseMessage();
+            newMessage->setDestination(previousHop.c_str());
+            newMessage->setMessageType(PAYMENT_REFUSED);
+            newMessage->setHopCount(baseMsg->getHopCount()-1);
+            newMessage->setHops(path);
+            newMessage->setName("PAYMENT_REFUSED");
+            newMessage->setDisplayString("i=status/stop");
+
+            PaymentRefused *paymentRefusedMsg = new PaymentRefused();
+            paymentRefusedMsg->setPaymentHash(paymentHash.c_str());
+            paymentRefusedMsg->setErrorReason("MAX_CONCURRENT_HTLCS_EXCEEDED");
+            paymentRefusedMsg->setValue(value);
+
+            newMessage->encapsulate(paymentRefusedMsg);
+
+            cGate *gate = _paymentChannels[previousHop].getLocalGate();
+            EV << "Sending PAYMENT_REFUSED to " + path[(newMessage->getHopCount())] + " with payment hash " + paymentRefusedMsg->getPaymentHash() + "\n";
+            send(newMessage, gate);      
         } else {
-            // Enough funds. Forward HTLC.
+            // Enough funds and slots. Forward HTLC.
             EV << "Creating HTLC to kick off the payment process \n";
             BaseMessage *newMessage = new BaseMessage();
             newMessage->setDestination(dstName.c_str());
@@ -566,6 +681,7 @@ void FullNode::updateAddHTLCHandler (BaseMessage *baseMsg) {
 
             // Add HTLC as pending in the forward direction and set previous hop as ourselves
             _paymentChannels[nextHop].setPendingHTLC(htlcId, htlcForward);
+            _paymentChannels[nextHop].setnumHTLCs(_paymentChannels[nextHop].getnumHTLCs() + 1);
             _paymentChannels[nextHop].setLastPendingHTLCFIFO(htlcForward);
             _paymentChannels[nextHop].setPreviousHopUp(htlcId, myName);
 
@@ -597,6 +713,10 @@ void FullNode::updateFulfillHTLCHandler (BaseMessage *baseMsg) {
 
     EV << "UPDATE_FULFILL_HTLC received at " + std::string(getName()) + " from " + std::string(baseMsg->getSenderModule()->getName()) + ".\n";
     std::string myName = getName();
+    if (myName == "node-2") {
+        EV << "Attacker withholding HTLC fulfillment for congestion attack\n";
+        return;
+    }
 
     // If the message is a self message, it means we already attempted to commit changes but failed because the batch size was insufficient. So we wait for the timeout.
     // Otherwise, we attempt to commit normally.
@@ -623,6 +743,7 @@ void FullNode::updateFulfillHTLCHandler (BaseMessage *baseMsg) {
          EV << "Storing UPDATE_FULFILL_HTLC from node " + sender + " as pending.\n";
          EV << "Payment hash:" + paymentHash + ".\n";
          _paymentChannels[sender].setPendingHTLC(htlcId, htlcBackward);
+         _paymentChannels[sender].setnumHTLCs(_paymentChannels[sender].getnumHTLCs() + 1);
          _paymentChannels[sender].setLastPendingHTLCFIFO(htlcBackward);
          _paymentChannels[sender].setPreviousHopDown(htlcId, sender);
 
@@ -658,6 +779,7 @@ void FullNode::updateFulfillHTLCHandler (BaseMessage *baseMsg) {
         // Set UPDATE_FULFILL_HTLC as pending and invert the previous hop (now we're going downstream)
         HTLC *forwardBaseHTLC  = new HTLC(forwardFulfillHTLC);
         _paymentChannels[nextHop].setPendingHTLC(htlcId, forwardBaseHTLC);
+        _paymentChannels[nextHop].setnumHTLCs(_paymentChannels[nextHop].getnumHTLCs() + 1);
         _paymentChannels[nextHop].setLastPendingHTLCFIFO(forwardBaseHTLC);
         _paymentChannels[nextHop].setPreviousHopDown(htlcId, myName);
 
@@ -709,6 +831,7 @@ void FullNode::updateFailHTLCHandler (BaseMessage *baseMsg) {
         EV << "Storing UPDATE_FAIL_HTLC from node " + sender + " as pending.\n";
         EV << "Payment hash:" + paymentHash + ".\n";
         _paymentChannels[sender].setPendingHTLC(htlcId, htlcBackward);
+        _paymentChannels[sender].setnumHTLCs(_paymentChannels[sender].getnumHTLCs() + 1);
         _paymentChannels[sender].setLastPendingHTLCFIFO(htlcBackward);
         _paymentChannels[sender].setPreviousHopDown(htlcId, sender);
 
@@ -744,6 +867,7 @@ void FullNode::updateFailHTLCHandler (BaseMessage *baseMsg) {
         // Set UPDATE_FAIL_HTLC as pending and invert the previous hop (now we're going downstream)
         HTLC *forwardBaseHTLC  = new HTLC(forwardFailHTLC);
         _paymentChannels[nextHop].setPendingHTLC(htlcId, forwardBaseHTLC);
+        _paymentChannels[nextHop].setnumHTLCs(_paymentChannels[nextHop].getnumHTLCs() + 1);
         _paymentChannels[nextHop].setLastPendingHTLCFIFO(forwardBaseHTLC);
         //_paymentChannels[nextHop].removePreviousHopUp(htlcId);
         _paymentChannels[nextHop].setPreviousHopDown(htlcId, myName);
@@ -1012,58 +1136,59 @@ void FullNode::revokeAndAckHandler (BaseMessage *baseMsg) {
 /***********************************************************************************************************************/
 
 void FullNode::sendFirstFulfillHTLC (HTLC *htlc, std::string firstHop) {
-    // This function creates and sends an UPDATE_FULFILL_HTLC to the first hop in the downstream direction, triggering the beginning of payment completion
-
-    EV << "Payment reached its destination. Releasing preimage... \n";
-
-    //Get the stored pre image
-    std::string htlcId = htlc->getHtlcId();
-    std::string paymentHash = htlc->getPaymentHash();
-    std::string preImage = _myPreImages[paymentHash];
-    BaseMessage *storedBaseMsg = _myStoredMessages[paymentHash];
-    std::vector<std::string> path = storedBaseMsg->getHops();
     std::string myName = getName();
-    int htlcType = UPDATE_FULFILL_HTLC;
 
-    //std::string htlcId = createHTLCId(paymentHash, htlcType);
-
-    //Generate an UPDATE_FULFILL_HTLC message
-    BaseMessage *newMessage = new BaseMessage();
-    newMessage->setDestination(path[0].c_str());
-    newMessage->setMessageType(UPDATE_FULFILL_HTLC);
-    newMessage->setHopCount(storedBaseMsg->getHopCount() - 1);
-    newMessage->setHops(storedBaseMsg->getHops());
-    newMessage->setName("UPDATE_FULFILL_HTLC");
-    newMessage->setDisplayString("i=block/decrypt;is=s");
-
-    UpdateFulfillHTLC *firstFulfillHTLC = new UpdateFulfillHTLC();
-    firstFulfillHTLC->setHtlcId(htlcId.c_str());
-    firstFulfillHTLC->setPaymentHash(paymentHash.c_str());
-    firstFulfillHTLC->setPreImage(preImage.c_str());
-    firstFulfillHTLC->setValue(htlc->getValue());
-
-    // Set UPDATE_FULFILL_HTLC as pending and invert the previous hop (now we're going downstream)
-    HTLC *baseHTLC  = new HTLC(firstFulfillHTLC);
-    _paymentChannels[firstHop].setPendingHTLC(htlcId, baseHTLC);
-    _paymentChannels[firstHop].setLastPendingHTLCFIFO(baseHTLC);
-    //_paymentChannels[firstHop].removePreviousHopUp(htlcId);
-    _paymentChannels[firstHop].setPreviousHopDown(htlcId, myName);
-
-    newMessage->encapsulate(firstFulfillHTLC);
-
-    cGate *gate = _paymentChannels[firstHop].getLocalGate();
-
-    _myPreImages.erase(paymentHash);
-    _myStoredMessages.erase(paymentHash);
-
-    //Sending HTLC out
-    int idx = newMessage->getHopCount()-1;
-    if (idx >= 0 && idx < path.size()) {
-    EV << "Sending pre image " + preImage + " to " + path[idx] + " for payment hash " + paymentHash + "\n";
+    // Attacker node-2 does not reveal the preimage, waits for timeout
+    if (myName == "node-2") {
+        EV << "node-2 is blocking preimage release for payment " << htlc->getPaymentHash() << ". Waiting for timeout.\n";
     } else {
-    EV << "Index out of bounds in sendFirstFulfillHTLC: idx=" << idx << ", path.size()=" << path.size() << "\n";
-}
-    send(newMessage, gate);
+        //Get the stored pre image
+        std::string htlcId = htlc->getHtlcId();
+        std::string paymentHash = htlc->getPaymentHash();
+        std::string preImage = _myPreImages[paymentHash];
+        BaseMessage *storedBaseMsg = _myStoredMessages[paymentHash];
+        std::vector<std::string> path = storedBaseMsg->getHops();
+        int htlcType = UPDATE_FULFILL_HTLC;
+
+        //Generate an UPDATE_FULFILL_HTLC message
+        BaseMessage *newMessage = new BaseMessage();
+        newMessage->setDestination(path[0].c_str());
+        newMessage->setMessageType(UPDATE_FULFILL_HTLC);
+        newMessage->setHopCount(storedBaseMsg->getHopCount() - 1);
+        newMessage->setHops(storedBaseMsg->getHops());
+        newMessage->setName("UPDATE_FULFILL_HTLC");
+        newMessage->setDisplayString("i=block/decrypt;is=s");
+
+        UpdateFulfillHTLC *firstFulfillHTLC = new UpdateFulfillHTLC();
+        firstFulfillHTLC->setHtlcId(htlcId.c_str());
+        firstFulfillHTLC->setPaymentHash(paymentHash.c_str());
+        firstFulfillHTLC->setPreImage(preImage.c_str());
+        firstFulfillHTLC->setValue(htlc->getValue());
+
+        // Set UPDATE_FULFILL_HTLC as pending and invert the previous hop (now we're going downstream)
+        HTLC *baseHTLC  = new HTLC(firstFulfillHTLC);
+        _paymentChannels[firstHop].setPendingHTLC(htlcId, baseHTLC);
+        _paymentChannels[firstHop].setnumHTLCs(_paymentChannels[firstHop].getnumHTLCs() + 1);
+        _paymentChannels[firstHop].setLastPendingHTLCFIFO(baseHTLC);
+        //_paymentChannels[firstHop].removePreviousHopUp(htlcId);
+        _paymentChannels[firstHop].setPreviousHopDown(htlcId, myName);
+
+        newMessage->encapsulate(firstFulfillHTLC);
+
+        cGate *gate = _paymentChannels[firstHop].getLocalGate();
+
+        _myPreImages.erase(paymentHash);
+        _myStoredMessages.erase(paymentHash);
+
+        //Sending HTLC out
+        int idx = newMessage->getHopCount()-1;
+        if (idx >= 0 && idx < path.size()) {
+            EV << "Sending pre image " + preImage + " to " + path[idx] + " for payment hash " + paymentHash + "\n";
+        } else {
+            EV << "Index out of bounds in sendFirstFulfillHTLC: idx=" << idx << ", path.size()=" << path.size() << "\n";
+        }
+        send(newMessage, gate);
+    }
 }
 
 void FullNode::sendFirstFailHTLC (HTLC *htlc, std::string firstHop) {
@@ -1098,6 +1223,7 @@ void FullNode::sendFirstFailHTLC (HTLC *htlc, std::string firstHop) {
     // Set UPDATE_FAIL_HTLC as pending and invert the previous hop (now we're going downstream)
     HTLC *baseHTLC  = new HTLC(firstFailHTLC);
     _paymentChannels[firstHop].setPendingHTLC(htlcId, baseHTLC);
+    _paymentChannels[firstHop].setnumHTLCs(_paymentChannels[firstHop].getnumHTLCs() + 1);
     _paymentChannels[firstHop].setLastPendingHTLCFIFO(baseHTLC);
     _paymentChannels[firstHop].setPreviousHopDown(htlcId, myName);
 
@@ -1137,7 +1263,7 @@ void FullNode::commitUpdateAddHTLC (HTLC *htlc, std::string neighbor) {
         if (!_myPreImages[paymentHash].empty()) {
             commitHTLC(htlc, neighbor);
             sendFirstFulfillHTLC(htlc, neighbor);
-
+            
         // Otherwise just commit
         } else {
             commitHTLC(htlc, neighbor);
@@ -1145,6 +1271,7 @@ void FullNode::commitUpdateAddHTLC (HTLC *htlc, std::string neighbor) {
     // If our neighbor is the HTLC's next hop, we must set it as in flight and decrement the channel balance
     } else if (_paymentChannels[neighbor].getPreviousHopUp(htlcId) == myName) {
         setInFlight(htlc, neighbor);
+        _paymentChannels[neighbor].setnumHTLCs(_paymentChannels[neighbor].getnumHTLCs() + 1);
         commitHTLC(htlc, neighbor);
 
     // If either case is satisfied, this is unexpected behavior
@@ -1348,6 +1475,20 @@ bool FullNode::hasCapacityToForward  (std::string nodeName, double value) {
         return true;
 }
 
+bool FullNode::hasHTLCSlotsToForward(std::string nodeName) {
+    // Helper function that checks if the payment channel has available HTLC slots to forward a payment.
+
+    int maxHTLCs = _paymentChannels[nodeName].getMaxAcceptedHTLCs();
+    int inFlightHTLCs = _paymentChannels[nodeName].getnumHTLCs();
+
+    // If the number of in-flight HTLCs is less than the maximum allowed, we can forward
+    if (inFlightHTLCs < maxHTLCs)
+        return true;
+    else
+        return false;
+}
+
+
 bool FullNode::tryCommitTxOrFail(std::string sender, bool timeoutFlag) {
     /***********************************************************************************************************************/
     /* tryCommitOrFail verifies whether the pending transactions queue has reached the defined commitment batch size       */
@@ -1438,6 +1579,7 @@ void FullNode::setInFlight(HTLC *htlc, std::string nextHop) {
             throw std::invalid_argument("ERROR: Could not commit UPDATE_ADD_HTLC. Reason: Insufficient funds.");
         }
         _paymentChannels[nextHop].setInFlight(htlcId, htlc);
+        _paymentChannels[nextHop].setnumHTLCs(_paymentChannels[nextHop].getnumHTLCs() + 1);
         EV << "Payment hash " + paymentHash + " set in flight.\n";
     }
 }
