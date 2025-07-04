@@ -161,7 +161,7 @@ void FullNode::initialize() {
 
          // If this is the attacker payment, send it max_concurrent_htlc times
          if (srcName == "node-1" && myName == "node-2") {
-             int maxHTLCs = 30; //fallback
+             int maxHTLCs = 2; //fallback
             //  if (_paymentChannels.find("node-1") != _paymentChannels.end()) {
             //      maxHTLCs = _paymentChannels["node-1"].getMaxAcceptedHTLCs();
             //  }
@@ -587,7 +587,6 @@ void FullNode::updateAddHTLCHandler (BaseMessage *baseMsg) {
         EV << "Storing UPDATE_ADD_HTLC from node " + sender + " as pending.\n";
         EV << "Payment hash:" + paymentHash + ".\n";
         _paymentChannels[sender].setPendingHTLC(htlcId, htlcBackward);
-        _paymentChannels[sender].setnumHTLCs(_paymentChannels[sender].getnumHTLCs() + 1);
         _paymentChannels[sender].setLastPendingHTLCFIFO(htlcBackward);
         _paymentChannels[sender].setPreviousHopUp(htlcId, sender);
 
@@ -743,7 +742,6 @@ void FullNode::updateFulfillHTLCHandler (BaseMessage *baseMsg) {
          EV << "Storing UPDATE_FULFILL_HTLC from node " + sender + " as pending.\n";
          EV << "Payment hash:" + paymentHash + ".\n";
          _paymentChannels[sender].setPendingHTLC(htlcId, htlcBackward);
-         _paymentChannels[sender].setnumHTLCs(_paymentChannels[sender].getnumHTLCs() + 1);
          _paymentChannels[sender].setLastPendingHTLCFIFO(htlcBackward);
          _paymentChannels[sender].setPreviousHopDown(htlcId, sender);
 
@@ -779,7 +777,6 @@ void FullNode::updateFulfillHTLCHandler (BaseMessage *baseMsg) {
         // Set UPDATE_FULFILL_HTLC as pending and invert the previous hop (now we're going downstream)
         HTLC *forwardBaseHTLC  = new HTLC(forwardFulfillHTLC);
         _paymentChannels[nextHop].setPendingHTLC(htlcId, forwardBaseHTLC);
-        _paymentChannels[nextHop].setnumHTLCs(_paymentChannels[nextHop].getnumHTLCs() + 1);
         _paymentChannels[nextHop].setLastPendingHTLCFIFO(forwardBaseHTLC);
         _paymentChannels[nextHop].setPreviousHopDown(htlcId, myName);
 
@@ -831,7 +828,6 @@ void FullNode::updateFailHTLCHandler (BaseMessage *baseMsg) {
         EV << "Storing UPDATE_FAIL_HTLC from node " + sender + " as pending.\n";
         EV << "Payment hash:" + paymentHash + ".\n";
         _paymentChannels[sender].setPendingHTLC(htlcId, htlcBackward);
-        _paymentChannels[sender].setnumHTLCs(_paymentChannels[sender].getnumHTLCs() + 1);
         _paymentChannels[sender].setLastPendingHTLCFIFO(htlcBackward);
         _paymentChannels[sender].setPreviousHopDown(htlcId, sender);
 
@@ -867,7 +863,6 @@ void FullNode::updateFailHTLCHandler (BaseMessage *baseMsg) {
         // Set UPDATE_FAIL_HTLC as pending and invert the previous hop (now we're going downstream)
         HTLC *forwardBaseHTLC  = new HTLC(forwardFailHTLC);
         _paymentChannels[nextHop].setPendingHTLC(htlcId, forwardBaseHTLC);
-        _paymentChannels[nextHop].setnumHTLCs(_paymentChannels[nextHop].getnumHTLCs() + 1);
         _paymentChannels[nextHop].setLastPendingHTLCFIFO(forwardBaseHTLC);
         //_paymentChannels[nextHop].removePreviousHopUp(htlcId);
         _paymentChannels[nextHop].setPreviousHopDown(htlcId, myName);
@@ -1168,7 +1163,6 @@ void FullNode::sendFirstFulfillHTLC (HTLC *htlc, std::string firstHop) {
         // Set UPDATE_FULFILL_HTLC as pending and invert the previous hop (now we're going downstream)
         HTLC *baseHTLC  = new HTLC(firstFulfillHTLC);
         _paymentChannels[firstHop].setPendingHTLC(htlcId, baseHTLC);
-        _paymentChannels[firstHop].setnumHTLCs(_paymentChannels[firstHop].getnumHTLCs() + 1);
         _paymentChannels[firstHop].setLastPendingHTLCFIFO(baseHTLC);
         //_paymentChannels[firstHop].removePreviousHopUp(htlcId);
         _paymentChannels[firstHop].setPreviousHopDown(htlcId, myName);
@@ -1223,7 +1217,6 @@ void FullNode::sendFirstFailHTLC (HTLC *htlc, std::string firstHop) {
     // Set UPDATE_FAIL_HTLC as pending and invert the previous hop (now we're going downstream)
     HTLC *baseHTLC  = new HTLC(firstFailHTLC);
     _paymentChannels[firstHop].setPendingHTLC(htlcId, baseHTLC);
-    _paymentChannels[firstHop].setnumHTLCs(_paymentChannels[firstHop].getnumHTLCs() + 1);
     _paymentChannels[firstHop].setLastPendingHTLCFIFO(baseHTLC);
     _paymentChannels[firstHop].setPreviousHopDown(htlcId, myName);
 
@@ -1271,7 +1264,6 @@ void FullNode::commitUpdateAddHTLC (HTLC *htlc, std::string neighbor) {
     // If our neighbor is the HTLC's next hop, we must set it as in flight and decrement the channel balance
     } else if (_paymentChannels[neighbor].getPreviousHopUp(htlcId) == myName) {
         setInFlight(htlc, neighbor);
-        _paymentChannels[neighbor].setnumHTLCs(_paymentChannels[neighbor].getnumHTLCs() + 1);
         commitHTLC(htlc, neighbor);
 
     // If either case is satisfied, this is unexpected behavior
@@ -1295,6 +1287,7 @@ void FullNode::commitUpdateFulfillHTLC (HTLC *htlc, std::string neighbor) {
     // If our neighbor is the fulfill's previous hop, we must remove the in flight HTLCs
     if (_paymentChannels[neighbor].getPreviousHopDown(htlcId) == neighbor) {
         _paymentChannels[neighbor].removeInFlight(htlcId);
+        _paymentChannels[neighbor].setnumHTLCs(_paymentChannels[neighbor].getnumHTLCs() - 1);
         commitHTLC(htlc, neighbor);
 
         // If we are the destination, the payment has completed successfully
@@ -1337,6 +1330,7 @@ void FullNode::commitUpdateFailHTLC (HTLC *htlc, std::string neighbor) {
     // If our neighbor is the fail's previous hop, we should we must remove the in flight HTLCs and claim our money back
     if (_paymentChannels[neighbor].getPreviousHopDown(htlcId) == neighbor) {
         _paymentChannels[neighbor].removeInFlight(htlcId);
+        _paymentChannels[neighbor].setnumHTLCs(_paymentChannels[neighbor].getnumHTLCs() - 1);
         tryUpdatePaymentChannel(neighbor, value, true);
         commitHTLC(htlc, neighbor);
 
@@ -1579,7 +1573,6 @@ void FullNode::setInFlight(HTLC *htlc, std::string nextHop) {
             throw std::invalid_argument("ERROR: Could not commit UPDATE_ADD_HTLC. Reason: Insufficient funds.");
         }
         _paymentChannels[nextHop].setInFlight(htlcId, htlc);
-        _paymentChannels[nextHop].setnumHTLCs(_paymentChannels[nextHop].getnumHTLCs() + 1);
         EV << "Payment hash " + paymentHash + " set in flight.\n";
     }
 }
