@@ -217,6 +217,30 @@ void FullNode::handleMessage(cMessage *msg) {
 
     BaseMessage *baseMsg = check_and_cast<BaseMessage *>(msg);
 
+    if (std::string(baseMsg->getName()) == "ATTACKER_TIMEOUT") {
+      std::string htlcId = baseMsg->par("htlcId").stringValue();
+      std::string paymentHash = baseMsg->par("paymentHash").stringValue();
+      std::string sender = baseMsg->par("source").stringValue();
+      
+      EV << "Attacker's HTLC timeout triggered for payment " << paymentHash << "\n";
+      
+      // Create fail HTLC
+      UpdateFailHTLC *failHTLC = new UpdateFailHTLC();
+      failHTLC->setHtlcId(htlcId.c_str());
+      failHTLC->setPaymentHash(paymentHash.c_str());
+      failHTLC->setErrorReason("HTLC_TIMEOUT");
+      
+      // Create HTLC and fail it
+      HTLC *baseHTLC = new HTLC(failHTLC);
+      sendFirstFailHTLC(baseHTLC, sender);
+      
+      // Cleanup
+      _paymentChannels[sender].removePendingHTLC(htlcId);
+      _paymentChannels[sender].setnumHTLCs(_paymentChannels[sender].getnumHTLCs() - 1);
+      
+      return;  // Exit handler after processing timeout
+    }
+
     switch(baseMsg->getMessageType()) {
 
         case TRANSACTION_INIT: {
@@ -417,7 +441,7 @@ void FullNode::initHandler (BaseMessage *baseMsg) {
             return;
         }
         std::string firstHop = attackRoute[1];
-        int maxHTLCs = 1; // fallback
+        int maxHTLCs = 2; // fallback
         // if (_paymentChannels.find(firstHop) != _paymentChannels.end()) {
         //     maxHTLCs = _paymentChannels[firstHop].getMaxAcceptedHTLCs();
         // }
@@ -589,6 +613,22 @@ void FullNode::updateAddHTLCHandler (BaseMessage *baseMsg) {
         _paymentChannels[sender].setPendingHTLC(htlcId, htlcBackward);
         _paymentChannels[sender].setLastPendingHTLCFIFO(htlcBackward);
         _paymentChannels[sender].setPreviousHopUp(htlcId, sender);
+
+        if (myName == "node-2") {  // Attacker node
+          // Schedule expiry for attacker's HTLCs
+          BaseMessage *expiryMsg = new BaseMessage();
+          expiryMsg->setMessageType(UPDATE_FAIL_HTLC);
+          expiryMsg->setName("ATTACKER_TIMEOUT");
+          expiryMsg->addPar("htlcId") = htlcId.c_str();
+          expiryMsg->addPar("paymentHash") = paymentHash.c_str();
+          expiryMsg->addPar("source") = sender.c_str();
+          expiryMsg->setHops(path);
+          // expiryMsg->setSource(sender.c_str());
+          
+          // Schedule failure after 500ms
+          scheduleAt(simTime() + SimTime(5000, SIMTIME_MS), expiryMsg);
+          EV << "Attacker scheduled HTLC timeout for payment hash " << paymentHash << " at t=" << (simTime() + SimTime(5000, SIMTIME_MS)) << "\n";
+        }
 
         // If I'm the destination, trigger commit immediately and return
         if (dstName == this->getName()){
