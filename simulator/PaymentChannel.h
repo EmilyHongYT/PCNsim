@@ -70,7 +70,7 @@ class PaymentChannel {
          virtual void setPendingHTLC (std::string htlcId, HTLC *htlc) { this->_pendingHTLCs[htlcId] = htlc; };
          virtual bool isPendingHTLC (HTLC *htlc);
          virtual std::map<std::string, HTLC*> getPendingHTLCs () { return this->_pendingHTLCs; };
-         virtual void removePendingHTLC (std::string htlcId) { this->_committedHTLCs.erase(htlcId); };
+         virtual void removePendingHTLC (std::string htlcId) { this->_pendingHTLCs.erase(htlcId); };
          virtual std::deque<HTLC *> getPendingHTLCsFIFO () { return this->_pendingHTLCsFIFO; };
          virtual void setFirstPendingHTLCFIFO (HTLC *htlc) { this->_pendingHTLCsFIFO.push_front(htlc); };
          virtual void setLastPendingHTLCFIFO (HTLC *htlc) { this->_pendingHTLCsFIFO.push_back(htlc); };
