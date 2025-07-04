@@ -315,7 +315,7 @@ void FullNode::finish() {
 
     if (countTotal != 0 ) {
         EV << "------------------ Statistics for node " + myName + "------------------\n";
-        double goodput = (double(countCompleted)/double(countFailed+countCompleted));
+        double goodput = (double(countCompleted)/double(countFailed+countCompleted+countCanceled));
         EV << "COMPLETED/FAILED/CANCELED: " + std::to_string(countCompleted) + "/" + std::to_string(countFailed) + "/" + std::to_string(countCanceled) + "\n";
         EV << "Goodput: " +  std::to_string(goodput) + "\n";
     }
