@@ -81,6 +81,9 @@ class FullNode : public cSimpleModule {
         int _countCanceled = 0;
         double _paymentGoodputSent = 0;
         double _paymentGoodputAll = 0;
+        std::string _role;
+        double _failureProbability = 0.0;
+        std::string _attackDestination;
 
 };
 
@@ -97,6 +100,9 @@ void FullNode::initialize() {
     _localTopology = globalTopology;
     this->localCommitCounter = 0;
     std::string myName = getName();
+    _role = par("role").stdstringValue();
+    _failureProbability = par("failureProbability").doubleValue();
+    _attackDestination = par("attackDestination").stdstringValue();
     std::map<std::string, std::vector<std::tuple<std::string, double, simtime_t>>> localPendingPayments = pendingPayments;
 
     // Initialize payment channels
@@ -159,56 +165,48 @@ void FullNode::initialize() {
          double value = std::get<1>(paymentTuple);
          simtime_t time = std::get<2>(paymentTuple);
 
-         // If this is the attacker payment, send it max_concurrent_htlc times
-         if (srcName == "node-1" && myName == "node-2") {
-             int maxHTLCs = 2; //fallback
-            //  if (_paymentChannels.find("node-1") != _paymentChannels.end()) {
-            //      maxHTLCs = _paymentChannels["node-1"].getMaxAcceptedHTLCs();
-            //  }
-             for (int i = 0; i < maxHTLCs; ++i) {
-                 char msgname[100];
-                 sprintf(msgname, "%s-to-%s;attack-%d;value:%0.1f", srcName.c_str(), myName.c_str(), i, value);
+         char msgname[100];
+         sprintf(msgname, "%s-to-%s;value:%0.1f", srcName.c_str(), myName.c_str(), value);
 
-                 Payment *trMsg = new Payment(msgname);
-                 trMsg->setSource(srcName.c_str());
-                 trMsg->setDestination(myName.c_str());
-                 trMsg->setValue(value);
-                 trMsg->setHopCount(0);
+         Payment *trMsg = new Payment(msgname);
+         trMsg->setSource(srcName.c_str());
+         trMsg->setDestination(myName.c_str());
+         trMsg->setValue(value);
+         trMsg->setHopCount(0);
 
-                 BaseMessage *baseMsg = new BaseMessage();
-                 baseMsg->setMessageType(TRANSACTION_INIT);
-                 baseMsg->setHopCount(0);
+         BaseMessage *baseMsg = new BaseMessage();
+         baseMsg->setMessageType(TRANSACTION_INIT);
+         baseMsg->setHopCount(0);
 
-                 baseMsg->encapsulate(trMsg);
-                 scheduleAt(simTime()+i*0.1, baseMsg);
-                 _isFirstSelfMessage = true;
-             }
-            EV << "Attacker" << srcName << "sent " << maxHTLCs << " payments for congestion attack.\n";
-         } else {
-             // Normal payment
-             char msgname[100];
-             sprintf(msgname, "%s-to-%s;value:%0.1f", srcName.c_str(), myName.c_str(), value);
-
-             // Create payment message
-             Payment *trMsg = new Payment(msgname);
-             trMsg->setSource(srcName.c_str());
-             trMsg->setDestination(myName.c_str());
-             trMsg->setValue(value);
-             trMsg->setHopCount(0);
-
-             // Create base message
-             BaseMessage *baseMsg = new BaseMessage();
-             baseMsg->setMessageType(TRANSACTION_INIT);
-             baseMsg->setHopCount(0);
-
-             // Encapsulate and schedule
-             baseMsg->encapsulate(trMsg);
-             scheduleAt(simTime()+time, baseMsg);
-             _isFirstSelfMessage = true;
-          }
+         baseMsg->encapsulate(trMsg);
+         scheduleAt(simTime()+time, baseMsg);
+         _isFirstSelfMessage = true;
       }
     } else {
     EV << "No workload found for " << myName.c_str() << ".\n";
+    }
+
+    if (_role == "malicious" && !_attackDestination.empty()) {
+        int maxHTLCs = 2;
+        double value = 1.0;
+        for (int i = 0; i < maxHTLCs; ++i) {
+            char msgname[100];
+            sprintf(msgname, "%s-to-%s;attack-%d;value:%0.1f", myName.c_str(), _attackDestination.c_str(), i, value);
+
+            Payment *trMsg = new Payment(msgname);
+            trMsg->setSource(myName.c_str());
+            trMsg->setDestination(_attackDestination.c_str());
+            trMsg->setValue(value);
+            trMsg->setHopCount(0);
+
+            BaseMessage *baseMsg = new BaseMessage();
+            baseMsg->setMessageType(TRANSACTION_INIT);
+            baseMsg->setHopCount(0);
+            baseMsg->encapsulate(trMsg);
+            scheduleAt(simTime()+i*0.1, baseMsg);
+            _isFirstSelfMessage = true;
+        }
+        EV << "Malicious node " << myName << " scheduled congestion attack towards " << _attackDestination << "\n";
     }
 }
 
@@ -216,6 +214,12 @@ void FullNode::handleMessage(cMessage *msg) {
     // Decapsulates and treats messages according to their message types
 
     BaseMessage *baseMsg = check_and_cast<BaseMessage *>(msg);
+
+    if (_role == "unreliable" && uniform(0,1) < _failureProbability) {
+        EV << "Unreliable node " << getName() << " dropped a message due to failure\n";
+        delete msg;
+        return;
+    }
 
     if (std::string(baseMsg->getName()) == "ATTACKER_TIMEOUT") {
       std::string htlcId = baseMsg->par("htlcId").stringValue();
@@ -433,7 +437,7 @@ void FullNode::initHandler (BaseMessage *baseMsg) {
     std::string srcPath = "PCN." + srcName;
     double value = initMsg->getValue();
     // Attacker behavior: initialize max_concurrent_number of HTLCs and do not reveal preimage
-    if (myName == "node-1" && dstName == "node-2") {
+    if (_role == "malicious" && dstName == _attackDestination) {
         // Get the attack route
         std::vector<std::string> attackRoute = dijkstraWeightedShortestPath(myName, dstName, adjMatrix);
         if (attackRoute.size() < 2) {
@@ -614,7 +618,7 @@ void FullNode::updateAddHTLCHandler (BaseMessage *baseMsg) {
         _paymentChannels[sender].setLastPendingHTLCFIFO(htlcBackward);
         _paymentChannels[sender].setPreviousHopUp(htlcId, sender);
 
-        if (myName == "node-2") {  // Attacker node
+        if (_role == "malicious") {
           // Schedule expiry for attacker's HTLCs
           BaseMessage *expiryMsg = new BaseMessage();
           expiryMsg->setMessageType(UPDATE_FAIL_HTLC);
@@ -752,7 +756,7 @@ void FullNode::updateFulfillHTLCHandler (BaseMessage *baseMsg) {
 
     EV << "UPDATE_FULFILL_HTLC received at " + std::string(getName()) + " from " + std::string(baseMsg->getSenderModule()->getName()) + ".\n";
     std::string myName = getName();
-    if (myName == "node-2") {
+    if (_role == "malicious") {
         EV << "Attacker withholding HTLC fulfillment for congestion attack\n";
         return;
     }
@@ -1173,9 +1177,9 @@ void FullNode::revokeAndAckHandler (BaseMessage *baseMsg) {
 void FullNode::sendFirstFulfillHTLC (HTLC *htlc, std::string firstHop) {
     std::string myName = getName();
 
-    // Attacker node-2 does not reveal the preimage, waits for timeout
-    if (myName == "node-2") {
-        EV << "node-2 is blocking preimage release for payment " << htlc->getPaymentHash() << ". Waiting for timeout.\n";
+    // Malicious nodes do not reveal the preimage, wait for timeout
+    if (_role == "malicious") {
+        EV << myName << " is blocking preimage release for payment " << htlc->getPaymentHash() << ". Waiting for timeout.\n";
     } else {
         //Get the stored pre image
         std::string htlcId = htlc->getHtlcId();
